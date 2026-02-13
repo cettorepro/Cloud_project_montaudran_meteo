@@ -21,3 +21,17 @@ L’objectif est de :
 - Interroger les données via Amazon Athena (SQL)
 
 L’architecture est entièrement serverless, scalable et orientée événements.
+
+🛠️ Services AWS utilisés
+
+- AWS Lambda – Fonction Python pour appeler l’API météo
+
+- Amazon EventBridge – Planification automatique (toutes les 15 minutes)
+
+- Amazon S3 – Stockage des données brutes et transformées
+
+- AWS Glue – Détection automatique du schéma
+
+- Amazon Athena – Requêtes SQL directement sur S3
+
+IAM – Gestion des permissions
