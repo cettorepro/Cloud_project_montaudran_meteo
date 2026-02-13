@@ -1,0 +1,78 @@
+
+#Supprimer la stack
+aws cloudformation delete-stack   --stack-name meteo-stack  
+
+# Mettre dans une variable l'ARN
+LAB_ROLE_ARN=$(aws iam get-role --role-name LabRole --query 'Role.Arn' --output text)
+
+#Creation de la stack
+aws cloudformation create-stack \
+  --stack-name meteo-stack \
+  --template-body file://template_finale.yaml \
+  --parameters \
+    ParameterKey=ExistingBucketName,ParameterValue=meteo-processed4 \
+    ParameterKey=ExistingLambdaRoleArn,ParameterValue=$LAB_ROLE_ARN \
+    ParameterKey=GlueDatabaseName,ParameterValue=sandbox_glue_db \
+  --capabilities CAPABILITY_IAM
+  
+  # Lancer la fonction
+  aws lambda invoke \
+  --function-name script-ingestion \
+  --payload '{"mode":"backfill_year","year":2026}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+
+  # Lancer la fonction (lancer 2 fois)
+  aws lambda invoke \
+  --function-name script-ingestion \
+  --payload '{"mode":"backfill_year","year":2025}' \
+  --cli-binary-format raw-in-base64-out \
+  response.json
+  
+  
+# Lancer le crawler
+  
+  aws glue start-crawler --name sandbox-glue-crawler
+  
+  #Executer requete SQL 
+
+# Récupérer toutes les NamedQueryIds
+QUERY_IDS=$(aws athena list-named-queries \
+  --query "NamedQueryIds[]" \
+  --output text)
+
+#  Boucle sur chaque requête
+for QUERY_ID in $QUERY_IDS
+do
+  echo "--------------------------------------"
+  echo "Exécution de la requête ID: $QUERY_ID"
+
+  # Récupérer le SQL
+  QUERY_STRING=$(aws athena get-named-query \
+    --named-query-id $QUERY_ID \
+    --query 'NamedQuery.QueryString' \
+    --output text)
+
+  # Lancer l'exécution
+  QUERY_EXECUTION_ID=$(aws athena start-query-execution \
+    --query-string "$QUERY_STRING" \
+    --query-execution-context Database=sandbox_glue_db \
+    --result-configuration OutputLocation="s3://athena-query-10024/" \
+    --query 'QueryExecutionId' \
+    --output text)
+
+  echo "QueryExecutionId: $QUERY_EXECUTION_ID"
+
+  # Attendre que la requête soit terminée
+  aws athena wait query-execution-complete \
+    --query-execution-id $QUERY_EXECUTION_ID
+
+  # Récupérer les résultats sous format csv
+  aws athena get-query-results \
+  --query-execution-id $QUERY_EXECUTION_ID \
+  | jq -r '.ResultSet.Rows[] | [.Data[].VarCharValue] | @csv' \
+  > $QUERY_EXECUTION_ID.csv
+
+done
+
+

@@ -1,0 +1,29 @@
+Procédure : mettre le role Labrole + mettre tcp perso sur 8501 + Prendre ipv4 et suivre la procédure suivante.
+
+sur Ubuntu : 
+
+
+ssh -i "kpp.pem" ubuntu@ec2-44-201-101-20.compute-1.amazonaws.com
+18.207.167.74
+
+sudo apt update -y
+sudo apt upgrade -y
+sudo apt install python3 python3-pip -y
+sudo apt install python3-pip
+pip3 install streamlit boto3 pandas plotly
+pip3 install fsspec s3fs
+pip3 install --upgrade pip
+pip3 install streamlit
+~/.local/bin/streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+
+
+
+dans cloud 9 : 
+
+chmod 400 kpp.pem
+
+
+scp -i ~/environment/test.pem ~/environment/dashboard.py ubuntu@98.91.200.21 :/home/ubuntu/
+
+
+scp -i ~/environment/kpp.pem ~/environment/dashboard.py ubuntu@ec2-44-201-101-20.compute-1.amazonaws.com:/home/ubuntu/

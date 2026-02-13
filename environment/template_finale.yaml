@@ -1,0 +1,624 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Stack complète S3 + Lambda (LabRole)
+
+Parameters:
+  ExistingBucketName:
+    Type: String
+    Description: Nom du bucket S3 existant
+
+  ExistingLambdaRoleArn:
+    Type: String
+    Description: ARN du rôle IAM existant avec accès Glue et S3
+
+  GlueDatabaseName:
+    Type: String
+    Description: Nom de la base Glue utilisée par Athena
+
+Resources:
+
+  ############################
+  # S3 BUCKETS
+  ############################
+
+  MeteoaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "meteo-raw4"
+
+  MeteobBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "meteo-processed4"
+      
+  MeteocBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "athena-query-10024"
+
+  ############################
+  # LAMBDA FUNCTION
+  ############################
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - MeteoaBucket
+      - MeteobBucket
+      - MeteocBucket
+    Properties:
+      FunctionName: script-ingestion
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !Ref ExistingLambdaRoleArn
+      Timeout: 60
+      Code:
+        ZipFile: |
+        
+          import json
+          import urllib.request
+          import urllib.parse
+          import boto3
+          from datetime import datetime, timezone
+          from io import StringIO
+          import csv
+          
+          s3 = boto3.client("s3")
+          
+          BUCKET_RAW = "meteo-raw4"
+          BUCKET_PROCESSED = "meteo-processed4"
+          
+          DATASET_ID = "12-station-meteo-toulouse-montaudran"
+          BASE_URL = f"https://data.toulouse-metropole.fr/api/explore/v2.1/catalog/datasets/{DATASET_ID}/records"
+          
+          API_LIMIT = 100
+          STOP_MARGIN_MS = 8000
+          
+          # State
+          STATE_PREFIX = "state/backfill"
+          INCR_CHECKPOINT_KEY = "state/last_ts.txt"
+          
+          
+          def api_get(params: dict) -> dict:
+              qs = urllib.parse.urlencode(params, safe=':+><= "')
+              url = f"{BASE_URL}?{qs}"
+              with urllib.request.urlopen(url, timeout=10) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+          
+          
+          def parse_iso(s: str) -> datetime:
+              return datetime.fromisoformat(s.replace("Z", "+00:00"))
+          
+          
+          def month_bounds(year: int, month: int) -> tuple[str, str]:
+              if month == 12:
+                  end_year, end_month = year + 1, 1
+              else:
+                  end_year, end_month = year, month + 1
+              start = f"{year}-{month:02d}-01T00:00:00+00:00"
+              end = f"{end_year}-{end_month:02d}-01T00:00:00+00:00"
+              return start, end
+          
+          
+          # ---------- STATE KEYS ----------
+          def year_state_key(year: int) -> str:
+              return f"{STATE_PREFIX}/year={year}.json"
+          
+          def month_state_key(year: int, month: int) -> str:
+              return f"{STATE_PREFIX}/year={year}/month={month:02d}.json"
+          
+          
+          # ---------- YEAR STATE ----------
+          def read_year_state(year: int) -> int:
+              try:
+                  obj = s3.get_object(Bucket=BUCKET_PROCESSED, Key=year_state_key(year))
+                  data = json.loads(obj["Body"].read().decode("utf-8"))
+                  nxt = int(data.get("next_month", 1))
+                  return nxt if 1 <= nxt <= 12 else 1
+              except Exception:
+                  return 1
+          
+          def write_year_state(year: int, next_month: int) -> None:
+              s3.put_object(
+                  Bucket=BUCKET_PROCESSED,
+                  Key=year_state_key(year),
+                  Body=json.dumps({"year": year, "next_month": next_month}).encode("utf-8"),
+                  ContentType="application/json"
+              )
+          
+          def clear_year_state(year: int) -> None:
+              try:
+                  s3.delete_object(Bucket=BUCKET_PROCESSED, Key=year_state_key(year))
+              except Exception:
+                  pass
+          
+          
+          # ---------- MONTH STATE (offset resume) ----------
+          def read_month_state(year: int, month: int) -> int:
+              """Retourne l'offset à reprendre (>=0)."""
+              try:
+                  obj = s3.get_object(Bucket=BUCKET_PROCESSED, Key=month_state_key(year, month))
+                  data = json.loads(obj["Body"].read().decode("utf-8"))
+                  off = int(data.get("offset", 0))
+                  return off if off >= 0 else 0
+              except Exception:
+                  return 0
+          
+          def write_month_state(year: int, month: int, offset: int) -> None:
+              s3.put_object(
+                  Bucket=BUCKET_PROCESSED,
+                  Key=month_state_key(year, month),
+                  Body=json.dumps({"year": year, "month": month, "offset": offset}).encode("utf-8"),
+                  ContentType="application/json"
+              )
+          
+          def clear_month_state(year: int, month: int) -> None:
+              try:
+                  s3.delete_object(Bucket=BUCKET_PROCESSED, Key=month_state_key(year, month))
+              except Exception:
+                  pass
+          
+          
+          # ---------- INCREMENTAL STATE ----------
+          def read_incremental_checkpoint() -> str | None:
+              try:
+                  obj = s3.get_object(Bucket=BUCKET_PROCESSED, Key=INCR_CHECKPOINT_KEY)
+                  ts = obj["Body"].read().decode("utf-8").strip()
+                  return ts if ts else None
+              except Exception:
+                  return None
+          
+          def write_incremental_checkpoint(ts: str) -> None:
+              s3.put_object(
+                  Bucket=BUCKET_PROCESSED,
+                  Key=INCR_CHECKPOINT_KEY,
+                  Body=(ts or "").encode("utf-8"),
+                  ContentType="text/plain"
+              )
+          
+          
+          # ---------- COUNT CHECK (évite faux mois "vide") ----------
+          def count_for_where(where: str) -> int:
+              j = api_get({"select": "count(*) as c", "where": where, "limit": 1})
+              res = j.get("results", [])
+              if not res:
+                  return 0
+              try:
+                  return int(res[0].get("c", 0))
+              except Exception:
+                  return 0
+          
+          
+          # ---------- WRITE FILES ----------
+          def write_month_files(rows: list[dict], year: int, month: int, now: datetime) -> tuple[str, str, str | None]:
+              raw_key = (
+                  f"raw/data_year={year}/data_month={month:02d}/"
+                  f"meteo_{year}{month:02d}{now.strftime('%Y%m%d_%H%M%S')}.json"
+              )
+              s3.put_object(
+                  Bucket=BUCKET_RAW,
+                  Key=raw_key,
+                  Body=json.dumps(rows, ensure_ascii=False).encode("utf-8"),
+                  ContentType="application/json"
+              )
+          
+              output = StringIO()
+              writer = csv.writer(output, delimiter=";")
+              writer.writerow(["heure_de_paris", "temperature", "humidite", "pression", "day", "mois", "annee", "heure"])
+          
+              last_ts = None
+              for r in rows:
+                  heure_str = r.get("heure_de_paris")
+                  if heure_str:
+                      last_ts = heure_str
+          
+                  day = mois = annee = heure = None
+                  if heure_str:
+                      try:
+                          dt = parse_iso(heure_str)
+                          day = dt.day
+                          mois = dt.month
+                          annee = dt.year
+                          heure = dt.hour
+                      except Exception:
+                          pass
+          
+                  writer.writerow([
+                      heure_str,
+                      r.get("temperature_en_degre_c"),
+                      r.get("humidite"),
+                      r.get("pression"),
+                      day, mois, annee, heure
+                  ])
+          
+              processed_key = (
+                  f"processed/data_year={year}/data_month={month:02d}/"
+                  f"meteo_{year}{month:02d}{now.strftime('%Y%m%d_%H%M%S')}.csv"
+              )
+              s3.put_object(
+                  Bucket=BUCKET_PROCESSED,
+                  Key=processed_key,
+                  Body=output.getvalue().encode("utf-8-sig"),
+                  ContentType="text/csv"
+              )
+          
+              return raw_key, processed_key, last_ts
+          
+          
+          # ---------- FETCH PAGE BY PAGE (resume offset) ----------
+          def fetch_month_pages(where: str, context, offset_start: int, limit: int = API_LIMIT) -> tuple[list[dict], int, bool]:
+              """
+              Retourne:
+                rows, new_offset, completed
+              completed=False si on s'arrête pour manque de temps.
+              """
+              rows_all = []
+              offset = offset_start
+          
+              while True:
+                  if context and context.get_remaining_time_in_millis() < STOP_MARGIN_MS:
+                      return rows_all, offset, False
+          
+                  j = api_get({
+                      "where": where,
+                      "order_by": "heure_de_paris asc",
+                      "limit": limit,
+                      "offset": offset
+                  })
+          
+                  rows = j.get("results", [])
+                  if not rows:
+                      return rows_all, offset, True
+          
+                  rows_all.extend(rows)
+                  offset += len(rows)
+          
+                  if offset > 500000:
+                      return rows_all, offset, True
+          
+          
+          def lambda_handler(event, context):
+              now = datetime.now(timezone.utc)
+              event = event or {}
+              mode = event.get("mode", "incremental")
+          
+              # =========================
+              # BACKFILL MONTH (répare un mois manquant)
+              # =========================
+              if mode == "backfill_month":
+                  year = int(event.get("year"))
+                  month = int(event.get("month"))
+          
+                  start, end = month_bounds(year, month)
+                  where = f'heure_de_paris >= "{start}" AND heure_de_paris < "{end}"'
+          
+                  # Vérif count pour éviter "faux vide"
+                  total = count_for_where(where)
+                  if total == 0:
+                      clear_month_state(year, month)
+                      return {"statusCode": 200, "body": json.dumps({"message": "NO_DATA_FOR_MONTH", "year": year, "month": month})}
+          
+                  offset_start = read_month_state(year, month)
+                  rows, new_offset, completed = fetch_month_pages(where, context, offset_start, limit=API_LIMIT)
+          
+                  if not completed:
+                      # Sauvegarde reprise offset
+                      write_month_state(year, month, new_offset)
+                      return {
+                          "statusCode": 200,
+                          "body": json.dumps({
+                              "message": "PARTIAL_MONTH_NEED_RERUN",
+                              "year": year,
+                              "month": month,
+                              "offset_resume": new_offset,
+                              "downloaded_rows_this_run": len(rows),
+                              "total_expected": total
+                          })
+                      }
+          
+                  # Completed: on écrit le mois complet
+                  clear_month_state(year, month)
+                  raw_key, processed_key, _ = write_month_files(rows, year, month, now)
+          
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "OK_MONTH_COMPLETE",
+                          "year": year,
+                          "month": month,
+                          "rows_written": len(rows),
+                          "total_expected": total,
+                          "raw_key": raw_key,
+                          "processed_key": processed_key
+                      })
+                  }
+          
+              # =========================
+              # BACKFILL YEAR (mois par mois avec reprise au mois)
+              # =========================
+              if mode == "backfill_year":
+                  year = int(event.get("year"))
+                  if year < 2024:
+                      return {"statusCode": 400, "body": json.dumps({"error": "Backfill commence à 2024"})}
+          
+                  current_year = now.year
+                  if year > current_year:
+                      return {"statusCode": 400, "body": json.dumps({"error": "Année future"})}
+          
+                  start_month = read_year_state(year)
+                  end_month = 12 if year < current_year else now.month
+          
+                  months_done = []
+                  months_empty = []
+          
+                  for month in range(start_month, end_month + 1):
+                      if context and context.get_remaining_time_in_millis() < STOP_MARGIN_MS:
+                          write_year_state(year, month)
+                          return {
+                              "statusCode": 200,
+                              "body": json.dumps({
+                                  "message": "PARTIAL_YEAR_NEED_RERUN",
+                                  "year": year,
+                                  "next_month": month,
+                                  "months_done": months_done,
+                                  "months_empty": months_empty
+                              })
+                          }
+          
+                      # Réutilise le moteur "backfill_month" en interne (avec count + offset)
+                      start, end = month_bounds(year, month)
+                      where = f'heure_de_paris >= "{start}" AND heure_de_paris < "{end}"'
+                      total = count_for_where(where)
+          
+                      if total == 0:
+                          months_empty.append(month)
+                          continue
+          
+                      offset_start = read_month_state(year, month)
+                      rows, new_offset, completed = fetch_month_pages(where, context, offset_start, limit=API_LIMIT)
+          
+                      if not completed:
+                          write_month_state(year, month, new_offset)
+                          write_year_state(year, month)
+                          return {
+                              "statusCode": 200,
+                              "body": json.dumps({
+                                  "message": "PARTIAL_YEAR_NEED_RERUN",
+                                  "year": year,
+                                  "next_month": month,
+                                  "month_offset_resume": new_offset,
+                                  "note": "Relance le même event, il reprendra au bon offset."
+                              })
+                          }
+          
+                      clear_month_state(year, month)
+                      raw_key, processed_key, _ = write_month_files(rows, year, month, now)
+                      months_done.append({"month": month, "rows": len(rows), "raw": raw_key, "csv": processed_key})
+          
+                  clear_year_state(year)
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "OK_YEAR_COMPLETE",
+                          "year": year,
+                          "months_done": months_done,
+                          "months_empty": months_empty
+                      })
+                  }
+          
+              # =========================
+              # INCREMENTAL (15 minutes)
+              # =========================
+              
+              if mode == "incremental":
+                  last_ts = read_incremental_checkpoint() or "2024-01-01T00:00:00+00:00"
+                  where = f'heure_de_paris > "{last_ts}"'
+          
+                  # ici pas besoin offset resume, volume petit
+                  rows, _, _ = fetch_month_pages(where, context, 0, limit=API_LIMIT)
+          
+                  if not rows:
+                      return {"statusCode": 200, "body": json.dumps({"message": "Pas de nouvelles données", "checkpoint": last_ts})}
+          
+                  try:
+                      first_dt = parse_iso(rows[0]["heure_de_paris"])
+                      year = first_dt.year
+                      month = first_dt.month
+                  except Exception:
+                      year = now.year
+                      month = now.month
+          
+                  raw_key, processed_key, new_last_ts = write_month_files(rows, year, month, now)
+                  if new_last_ts:
+                      write_incremental_checkpoint(new_last_ts)
+          
+                  return {
+                      "statusCode": 200,
+                      "body": json.dumps({
+                          "message": "OK_INCREMENTAL",
+                          "rows_written": len(rows),
+                          "raw_key": raw_key,
+                          "processed_key": processed_key,
+                          "new_checkpoint": new_last_ts
+                      })
+                  }
+          
+              return {"statusCode": 400, "body": json.dumps({"error": "Mode inconnu"})}
+                  
+  LambdaSchedule15Min:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: MySandboxLambdaSchedule15Min
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction.Arn
+          Id: MySandboxLambdaTarget
+          Input: |
+            {
+                "mode": "backfill_year",
+                "year": 2026
+            }
+
+  PermissionForEventBridge:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MyLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaSchedule15Min.Arn
+
+  ############################
+  # Glue crawler et Athena
+  ############################
+
+  ### Base Glue ###
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    DependsOn: 
+    - MyLambdaFunction
+    - LambdaSchedule15Min
+    - PermissionForEventBridge
+    Properties:
+      CatalogId: !Ref "AWS::AccountId"
+      DatabaseInput:
+        Name: sandbox_glue_db
+
+  ### Crawler Glue ###
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: sandbox-glue-crawler
+      Role: !Ref ExistingLambdaRoleArn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${ExistingBucketName}/"
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  ############################
+  # Requetes SQL Athena
+  ###########################
+
+  AthenaQuery1:
+    Type: AWS::Athena::NamedQuery
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawler
+    Properties:
+      Database: !Ref GlueDatabase
+      Name: Query_1_mesure
+      Description:  Nombre de mesures par heure par mois
+      QueryString: |
+        SELECT mois,annee,
+        COUNT(*) AS nb_mesures
+        FROM processed
+        GROUP BY mois, annee
+        ORDER BY mois, annee;
+        
+  AthenaQuery2:
+    Type: AWS::Athena::NamedQuery
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawler
+    Properties:
+      Database: !Ref GlueDatabase
+      Name: Query_2_temperature_avg
+      Description: Température moyenne par heure par jour
+      QueryString: |
+        SELECT
+        day AS jour,
+        AVG(temperature) AS temp_moy
+        FROM processed
+        GROUP BY day
+        ORDER BY jour;
+        
+  AthenaQuery3:
+    Type: AWS::Athena::NamedQuery
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawler
+    Properties:
+      Database: !Ref GlueDatabase
+      Name: Query_3_between_2dates
+      Description:  Données entre deux dates
+      QueryString: |
+        SELECT day, mois,
+        annee,
+        temperature,
+        humidite,
+        pression
+        FROM processed
+        where day between 1 and 16
+        and mois = 2
+        and annee = 2025
+        ORDER BY day;
+        
+  AthenaQuery4:
+    Type: AWS::Athena::NamedQuery
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawler
+    Properties:
+      Database: !Ref GlueDatabase
+      Name: Query_4_minmax_temp
+      Description:  Min / max temperature entre 2025 et 2026
+      QueryString: |
+        SELECT
+          annee,
+          MIN(temperature) AS temp_min,
+          MAX(temperature) AS temp_max
+        FROM processed
+        WHERE annee IN (2025, 2026)
+        GROUP BY annee
+        ORDER BY annee;
+
+        
+  AthenaQuery5:
+    Type: AWS::Athena::NamedQuery
+    DependsOn:
+      - GlueDatabase
+      - GlueCrawler
+    Properties:
+      Database: !Ref GlueDatabase
+      Name: Query_5_temps_hum_avg
+      Description: Temperature et humidite moyenne entre différent mois d'une année
+      QueryString: |
+        SELECT
+        mois,
+        AVG(temperature) AS temp_moy,
+        AVG(humidite) AS humidite_moy
+        FROM processed
+        WHERE annee = 2025
+        AND mois BETWEEN 1 AND 10
+        GROUP BY  mois
+        ORDER BY mois;
+        
+Outputs:
+  MeteoaBucketName:
+      Description: Nom du bucket Meteo-raw
+      Value: !Ref MeteoaBucket
+  
+  MeteobBucketName:
+      Description: Nom du bucket Meteo-processed
+      Value: !Ref MeteobBucket
+      
+  MeteocBucketName:
+      Description: Nom du bucket Athena-query-10023
+      Value: !Ref MeteocBucket
+  
+  LambdaName:
+      Value: !Ref MyLambdaFunction
+  
+  GlueDatabaseName:
+      Description: Nom de la base Glue
+      Value: !Ref GlueDatabase
+  GlueCrawlerName:
+      Description: Nom du crawler Glue
+      Value: !Ref GlueCrawler
+  
+  AthenaQueriesCreated:
+      Description: Requêtes Athena créées
+      Value: 5
+
