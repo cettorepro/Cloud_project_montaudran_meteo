@@ -16,7 +16,7 @@ L’objectif est de :
 
 - Stocker les données transformées dans S3
 
-- Cataloguer les données avec AWS Glue
+- Définir le schéma des données  avec AWS Glue Crawler
 
 - Interroger les données via Amazon Athena (SQL)
 
