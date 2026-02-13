@@ -20,6 +20,8 @@ L’objectif est de :
 
 - Interroger les données via Amazon Athena (SQL)
 
+- Dashboard de KPI déployer sur instance EC2 Ubuntu 
+
 L’architecture est entièrement serverless, scalable et orientée événements.
 
 🛠️ Services AWS utilisés
@@ -34,4 +36,4 @@ L’architecture est entièrement serverless, scalable et orientée événements
 
 - Amazon Athena – Requêtes SQL directement sur S3
 
-IAM – Gestion des permissions
+- AWS CloudFormation - Déploiement automatisé des ressources
