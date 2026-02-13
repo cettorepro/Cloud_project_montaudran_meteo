@@ -54,3 +54,8 @@ Compétences mises en œuvre durant ce projet :
 
 - Requêtage SQL sur S3
 
+Participant de ce projet : 
+
+Ha Linh Nguyen 
+Ettore Carvali
+Projet Data Engineering Météo site Montaudran – 2026
