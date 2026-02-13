@@ -40,7 +40,7 @@ Services AWS utilisés :
 
 - AWS CloudFormation - Déploiement automatisé des ressources (Iac)
 
-<img width="1684" height="944" alt="Capture d&#39;écran 2026-02-13 085812" src="https://github.com/user-attachments/assets/2e463f6a-eeec-40be-b2ec-e7c9aba72bc0" />
+![Copie de Gourvernance SI - Intéropérabilité ](https://github.com/user-attachments/assets/5606ab79-4ba2-4e01-8865-6335da00b98f)
 
 Compétences mises en œuvre durant ce projet : 
 
