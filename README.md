@@ -7,7 +7,7 @@ Ce projet met en place un pipeline de données pour la station météo du quarti
 
 L’objectif est de :
 
-- Collecter les données météo d’une ville via une API externe
+- Collecter les données de la station météo de montaudran via une API
 
 - Stocker les données brutes dans Amazon S3
 
