@@ -22,7 +22,7 @@ L’objectif est de :
 
 - Présenter les KPI sur un tableau de bord déployé sur instance EC2 Ubuntu
 
-- Automatisation du déploiement du pipeline grâce à AWS Cloudformation
+- Automatisation du déploiement du pipeline grâce à AWS Cloudformation (Iac)
 
 L’architecture est entièrement serverless, scalable et orientée événements.
 
@@ -38,4 +38,4 @@ L’architecture est entièrement serverless, scalable et orientée événements
 
 - Amazon Athena – Requêtes SQL directement sur S3
 
-- AWS CloudFormation - Déploiement automatisé des ressources
+- AWS CloudFormation - Déploiement automatisé des ressources (Iac)
