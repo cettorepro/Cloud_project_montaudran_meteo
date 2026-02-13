@@ -1,7 +1,8 @@
 # Cloud_project_montaudran_meteo
 
 🌦️ Pipeline de Données Météo – Architecture Serverless AWS (Quasi Temps Réel)
-📌 Présentation du projet
+
+Présentation du projet
 
 Ce projet met en place un pipeline de données pour la station météo du quartier Montaudran en quasi temps réel sur AWS.
 
