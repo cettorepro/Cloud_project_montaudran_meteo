@@ -20,7 +20,9 @@ L’objectif est de :
 
 - Interroger les données via Amazon Athena (SQL)
 
-- Dashboard de KPI déployer sur instance EC2 Ubuntu 
+- Présenter les KPI sur un tableau de bord déployé sur instance EC2 Ubuntu
+
+- Automatisation du déploiement du pipeline grâce à AWS Cloudformation
 
 L’architecture est entièrement serverless, scalable et orientée événements.
 
