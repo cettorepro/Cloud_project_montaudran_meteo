@@ -26,7 +26,7 @@ L’objectif est de :
 
 L’architecture est entièrement serverless, scalable et orientée événements.
 
-🛠️ Services AWS utilisés
+Services AWS utilisés : 
 
 - AWS Lambda – Fonction Python pour appeler l’API météo
 
@@ -40,7 +40,8 @@ L’architecture est entièrement serverless, scalable et orientée événements
 
 - AWS CloudFormation - Déploiement automatisé des ressources (Iac)
 
-🎯 Compétences mises en œuvre
+
+Compétences mises en œuvre durant ce projet : 
 
 - Architecture serverless
 
