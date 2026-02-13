@@ -39,3 +39,15 @@ L’architecture est entièrement serverless, scalable et orientée événements
 - Amazon Athena – Requêtes SQL directement sur S3
 
 - AWS CloudFormation - Déploiement automatisé des ressources (Iac)
+
+🎯 Compétences mises en œuvre
+
+- Architecture serverless
+
+- Data Lake sur AWS
+
+- Pipeline de données
+
+- Event-driven architecture
+
+- Requêtage SQL sur S3
